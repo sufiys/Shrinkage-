@@ -1,0 +1,170 @@
+import streamlit as st
+import sqlite3
+import pandas as pd
+import datetime
+
+# --------------------------
+# Database Setup (SQLite)
+# --------------------------
+conn = sqlite3.connect('shrinkage.db', check_same_thread=False)
+c = conn.cursor()
+
+# Create table for login records if not exists
+c.execute('''
+CREATE TABLE IF NOT EXISTS login_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    csa_id TEXT,
+    date DATE,
+    scheduled_logins INTEGER,
+    actual_logins INTEGER,
+    weekoff INTEGER
+)
+''')
+
+# Create table for leave records if not exists
+c.execute('''
+CREATE TABLE IF NOT EXISTS leave_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    csa_id TEXT,
+    date DATE,
+    leave_type TEXT,
+    annotation TEXT
+)
+''')
+conn.commit()
+
+# --------------------------
+# Helper Functions
+# --------------------------
+def add_login_record(csa_id, date, scheduled_logins, actual_logins, weekoff):
+    c.execute(
+        'INSERT INTO login_records (csa_id, date, scheduled_logins, actual_logins, weekoff) VALUES (?,?,?,?,?)',
+        (csa_id, date, scheduled_logins, actual_logins, int(weekoff))
+    )
+    conn.commit()
+
+def add_leave_record(csa_id, date, leave_type, annotation):
+    c.execute(
+        'INSERT INTO leave_records (csa_id, date, leave_type, annotation) VALUES (?,?,?,?)',
+        (csa_id, date, leave_type, annotation)
+    )
+    conn.commit()
+
+def get_week_range(ref_date):
+    start_week = ref_date - datetime.timedelta(days=ref_date.weekday())
+    end_week = start_week + datetime.timedelta(days=6)
+    return start_week, end_week
+
+# --------------------------
+# Streamlit App Layout
+# --------------------------
+st.title("Shrinkage Management System")
+
+menu = ["Logins", "Leaves", "Shrinkage"]
+choice = st.sidebar.selectbox("Menu", menu)
+
+# --------------------------
+# Logins Section
+# --------------------------
+if choice == "Logins":
+    st.header("Login Records")
+    with st.form("login_form", clear_on_submit=True):
+        csa_id = st.text_input("CSA ID")
+        date = st.date_input("Date", datetime.date.today())
+        scheduled_logins = st.number_input("Scheduled Logins", min_value=0, step=1)
+        actual_logins = st.number_input("Actual Logins", min_value=0, step=1)
+        weekoff = st.checkbox("Weekoff")
+        submit = st.form_submit_button("Submit")
+        if submit:
+            add_login_record(csa_id, date, scheduled_logins, actual_logins, weekoff)
+            st.success("Login record added successfully!")
+            
+    st.subheader("View Weekly Login Records")
+    week_date = st.date_input("Select a date from the week", datetime.date.today(), key="login_week_date")
+    start_week, end_week = get_week_range(week_date)
+    query = "SELECT * FROM login_records WHERE date BETWEEN ? AND ?"
+    df = pd.read_sql_query(query, conn, params=(start_week, end_week))
+    st.write(f"Records from {start_week} to {end_week}")
+    st.dataframe(df)
+
+# --------------------------
+# Leaves Section
+# --------------------------
+elif choice == "Leaves":
+    st.header("Leave Records")
+    with st.form("leave_form", clear_on_submit=True):
+        csa_id = st.text_input("CSA ID", key="leave_csa")
+        date = st.date_input("Date", datetime.date.today(), key="leave_date")
+        leave_type = st.selectbox("Leave Type", ["AL", "SL", "CL"], key="leave_type")
+        annotation = st.text_area("Annotation (Reason for leave)", key="annotation")
+        submit = st.form_submit_button("Submit")
+        if submit:
+            add_leave_record(csa_id, date, leave_type, annotation)
+            st.success("Leave record added successfully!")
+    
+    st.subheader("View Weekly Leave Records")
+    week_date = st.date_input("Select a date from the week to view leaves", datetime.date.today(), key="leave_week_date")
+    start_week, end_week = get_week_range(week_date)
+    query = "SELECT * FROM leave_records WHERE date BETWEEN ? AND ?"
+    df = pd.read_sql_query(query, conn, params=(start_week, end_week))
+    st.write(f"Leaves from {start_week} to {end_week}")
+    st.dataframe(df)
+
+# --------------------------
+# Shrinkage Section
+# --------------------------
+elif choice == "Shrinkage":
+    st.header("Shrinkage Calculation")
+    # Editable shrinkage goal
+    shrinkage_goal = st.number_input("Enter shrinkage goal (%)", min_value=0.0, max_value=100.0, value=10.0, step=0.1)
+    
+    # Choose calculation mode
+    mode = st.radio("Select Calculation Mode", ["Daily", "Weekly"])
+    
+    if mode == "Daily":
+        selected_date = st.date_input("Select Date for shrinkage calculation", datetime.date.today(), key="shrinkage_date")
+        query = "SELECT * FROM login_records WHERE date = ?"
+        df = pd.read_sql_query(query, conn, params=(selected_date,))
+        st.subheader(f"Login Records on {selected_date}")
+        st.dataframe(df)
+        
+        if not df.empty:
+            # Calculate daily shrinkage for each record
+            df['shrinkage'] = df.apply(lambda row: ((row['scheduled_logins'] - row['actual_logins']) / row['scheduled_logins'])*100 
+                                        if row['scheduled_logins'] > 0 else 0, axis=1)
+            avg_shrinkage = df['shrinkage'].mean()
+            st.write("Average Shrinkage: {:.2f}%".format(avg_shrinkage))
+            
+            if avg_shrinkage <= shrinkage_goal:
+                st.success("Shrinkage is within the goal!")
+            else:
+                st.error("Shrinkage exceeds the goal!")
+                # Calculate required leave deletion:
+                total_scheduled = df['scheduled_logins'].sum()
+                total_leaves = total_scheduled - df['actual_logins'].sum()
+                # Leaves needed such that new shrinkage = ((total_leaves - x) / total_scheduled)*100 <= goal
+                required_deletion = total_leaves - int((shrinkage_goal/100)*total_scheduled)
+                st.write("Delete at least {} leave(s) to meet the shrinkage goal.".format(required_deletion if required_deletion > 0 else 0))
+    
+    else:  # Weekly Calculation
+        week_date = st.date_input("Select a date from the week for shrinkage calculation", datetime.date.today(), key="week_shrinkage_date")
+        start_week, end_week = get_week_range(week_date)
+        query = "SELECT * FROM login_records WHERE date BETWEEN ? AND ?"
+        df = pd.read_sql_query(query, conn, params=(start_week, end_week))
+        st.subheader(f"Login Records from {start_week} to {end_week}")
+        st.dataframe(df)
+        
+        if not df.empty:
+            df['shrinkage'] = df.apply(lambda row: ((row['scheduled_logins'] - row['actual_logins']) / row['scheduled_logins'])*100 
+                                        if row['scheduled_logins'] > 0 else 0, axis=1)
+            avg_shrinkage = df['shrinkage'].mean()
+            st.write("Weekly Average Shrinkage: {:.2f}%".format(avg_shrinkage))
+            
+            if avg_shrinkage <= shrinkage_goal:
+                st.success("Shrinkage is within the goal!")
+            else:
+                st.error("Shrinkage exceeds the goal!")
+                total_scheduled = df['scheduled_logins'].sum()
+                total_leaves = total_scheduled - df['actual_logins'].sum()
+                required_deletion = total_leaves - int((shrinkage_goal/100)*total_scheduled)
+                st.write("Delete at least {} leave(s) to meet the shrinkage goal.".format(required_deletion if required_deletion > 0 else 0))
