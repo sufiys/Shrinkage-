@@ -234,6 +234,14 @@ def get_leave_summary(login):
         df["Date"] = df.apply(lambda row: get_week_dates_us(row["week"], datetime.date.today().year)[row["day"]].strftime("%Y-%m-%d"), axis=1)
     return df
 
+def get_day_shrinkage_overview(week):
+    days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+    data = []
+    for d in days:
+        details = get_day_shrinkage_details(week, d)
+        data.append({"Day": d, "Shrinkage (%)": details["Shrinkage (%)"], "Scheduled": details["Scheduled"], "Leaves": details["Leaves"]})
+    return pd.DataFrame(data)
+
 # ---------------------------
 # Main Navigation
 # ---------------------------
@@ -257,13 +265,11 @@ if menu == "Dashboard":
     # Day-wise Shrinkage Analysis with Absent Details
     st.markdown("### Day-wise Shrinkage Analysis")
     selected_week_for_day = st.number_input("Enter Week Number for Day-wise Analysis", min_value=1, step=1, value=1, key="day_shrink_week")
-    df_day_shrink = get_weekly_shrinkage_overview()
-    # You can also show the day's shrinkage details in a table if needed.
-    st.dataframe(df_day_shrink[df_day_shrink["Week"] == selected_week_for_day])
-    
-    fig_day = px.bar(df_day_shrink[df_day_shrink["Week"] == selected_week_for_day],
-                     x="Week", y="Shrinkage (%)",
-                     title=f"Shrinkage for Week {selected_week_for_day}")
+    df_day_shrink = get_day_shrinkage_overview(selected_week_for_day)
+    st.dataframe(df_day_shrink)
+    fig_day = px.bar(df_day_shrink, x="Day", y="Shrinkage (%)",
+                     title=f"Day-wise Shrinkage for Week {selected_week_for_day}",
+                     labels={"Shrinkage (%)": "Shrinkage (%)", "Day": "Day"})
     st.plotly_chart(fig_day, use_container_width=True)
     
     st.markdown("#### Absent Details by Day")
