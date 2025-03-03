@@ -172,9 +172,21 @@ def get_weekly_shrinkage_overview():
         overview.append({"Week": wk, "Total Scheduled": total_scheduled, "Total Leaves": total_leaves, "Shrinkage (%)": round(shrinkage,2)})
     return pd.DataFrame(overview)
 
+def get_day_shrinkage_details(week, day):
+    c = conn.cursor()
+    c.execute(f"SELECT COUNT(*) FROM schedule WHERE week = ? AND {day} != 'OFF'", (week,))
+    scheduled = c.fetchone()[0]
+    c.execute(f"SELECT COUNT(*) FROM schedule WHERE week = ? AND {day} IN ('AL','SL','CL','L')", (week,))
+    leaves = c.fetchone()[0]
+    shrinkage = (leaves / scheduled * 100) if scheduled > 0 else 0
+    c.execute("SELECT login, leave_type, annotation FROM leaves WHERE week = ? AND day = ?", (week, day))
+    details = [{"login": row[0], "leave_type": row[1], "annotation": row[2]} for row in c.fetchall()]
+    return {"Scheduled": scheduled, "Leaves": leaves, "Shrinkage (%)": round(shrinkage, 2), "Details": details}
+
 def get_daywise_leaves(week, day):
-    query = f"SELECT id, login, shift, {day} as Leave_Type FROM schedule WHERE week = ? AND {day} IN ('AL','SL','CL','L')"
-    return pd.read_sql_query(query, conn, params=(week,))
+    # Updated to fetch annotation information from the leaves table.
+    query = "SELECT id, login, leave_type as Leave_Type, annotation FROM leaves WHERE week = ? AND day = ?"
+    return pd.read_sql_query(query, conn, params=(week, day))
 
 def update_schedule_day(entry_id, day, new_value):
     c = conn.cursor()
@@ -222,25 +234,6 @@ def get_leave_summary(login):
         df["Date"] = df.apply(lambda row: get_week_dates_us(row["week"], datetime.date.today().year)[row["day"]].strftime("%Y-%m-%d"), axis=1)
     return df
 
-def get_day_shrinkage_details(week, day):
-    c = conn.cursor()
-    c.execute(f"SELECT COUNT(*) FROM schedule WHERE week = ? AND {day} != 'OFF'", (week,))
-    scheduled = c.fetchone()[0]
-    c.execute(f"SELECT COUNT(*) FROM schedule WHERE week = ? AND {day} IN ('AL','SL','CL','L')", (week,))
-    leaves = c.fetchone()[0]
-    shrinkage = (leaves / scheduled * 100) if scheduled > 0 else 0
-    c.execute("SELECT login, leave_type, annotation FROM leaves WHERE week = ? AND day = ?", (week, day))
-    details = [{"login": row[0], "leave_type": row[1], "annotation": row[2]} for row in c.fetchall()]
-    return {"Scheduled": scheduled, "Leaves": leaves, "Shrinkage (%)": round(shrinkage, 2), "Details": details}
-
-def get_day_shrinkage_overview(week):
-    days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-    data = []
-    for d in days:
-        details = get_day_shrinkage_details(week, d)
-        data.append({"Day": d, "Shrinkage (%)": details["Shrinkage (%)"], "Scheduled": details["Scheduled"], "Leaves": details["Leaves"]})
-    return pd.DataFrame(data)
-
 # ---------------------------
 # Main Navigation
 # ---------------------------
@@ -259,7 +252,8 @@ if menu == "Dashboard":
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("No schedule data available for analytics.")
-    # Day-wise Shrinkage Analysis for selected week
+    
+    # Day-wise Shrinkage Analysis with Absent Details
     st.markdown("### Day-wise Shrinkage Analysis")
     selected_week_for_day = st.number_input("Enter Week Number for Day-wise Analysis", min_value=1, step=1, value=1, key="day_shrink_week")
     df_day_shrink = get_day_shrinkage_overview(selected_week_for_day)
@@ -268,6 +262,17 @@ if menu == "Dashboard":
                      title=f"Day-wise Shrinkage for Week {selected_week_for_day}",
                      labels={"Shrinkage (%)": "Shrinkage (%)", "Day": "Day"})
     st.plotly_chart(fig_day, use_container_width=True)
+    
+    st.markdown("#### Absent Details by Day")
+    week_dates = get_week_dates_us(selected_week_for_day, datetime.date.today().year)
+    for day in ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]:
+        details = get_day_shrinkage_details(selected_week_for_day, day)
+        st.markdown(f"**{day} - {week_dates[day].strftime('%Y-%m-%d')}**")
+        if details["Details"]:
+            df_details = pd.DataFrame(details["Details"])
+            st.table(df_details)
+        else:
+            st.write("No absences for this day.")
 
 # ---------- Schedule Management ----------
 elif menu == "Schedule Management":
@@ -409,23 +414,6 @@ elif menu == "Schedule Management":
             else:
                 st.info("No weeks available for the selected login(s).")
         
-        st.subheader("Shrinkage Calculation for a Week")
-        calc_week = st.number_input("Enter Week Number to calculate shrinkage", min_value=1, step=1, key="calc_week")
-        year_calc = st.number_input("Enter Year for Calculation", value=datetime.date.today().year, step=1, key="calc_year")
-        if st.button("Calculate Shrinkage"):
-            df_overview = get_weekly_shrinkage_overview()
-            st.write("### Overall Weekly Shrinkage Overview")
-            st.dataframe(df_overview[df_overview['Week'] == calc_week])
-            st.markdown("#### Day-wise Shrinkage Details")
-            for d in ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]:
-                details = get_day_shrinkage_details(calc_week, d)
-                with st.expander(f"{d} Details"):
-                    st.write(f"Scheduled: {details['Scheduled']}, Leaves: {details['Leaves']}, Shrinkage: {details['Shrinkage (%)']}%")
-                    if details["Details"]:
-                        st.table(pd.DataFrame(details["Details"]))
-                    else:
-                        st.write("No leave records for this day.")
-                        
 # ---------- Reports ----------
 elif menu == "Reports":
     st.title("Reports")
