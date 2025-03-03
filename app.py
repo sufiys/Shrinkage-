@@ -184,7 +184,7 @@ def get_day_shrinkage_details(week, day):
     return {"Scheduled": scheduled, "Leaves": leaves, "Shrinkage (%)": round(shrinkage, 2), "Details": details}
 
 def get_daywise_leaves(week, day):
-    # Updated to fetch annotation information from the leaves table.
+    # Fetch leave details including annotations.
     query = "SELECT id, login, leave_type as Leave_Type, annotation FROM leaves WHERE week = ? AND day = ?"
     return pd.read_sql_query(query, conn, params=(week, day))
 
@@ -243,6 +243,7 @@ menu = st.sidebar.radio("Navigation", ["Dashboard", "Schedule Management", "Repo
 if menu == "Dashboard":
     st.title("Dashboard")
     st.markdown("### Overview and Interactive Analytics")
+    
     # Weekly Shrinkage Overview
     df_shrink = get_weekly_shrinkage_overview()
     if not df_shrink.empty:
@@ -256,11 +257,13 @@ if menu == "Dashboard":
     # Day-wise Shrinkage Analysis with Absent Details
     st.markdown("### Day-wise Shrinkage Analysis")
     selected_week_for_day = st.number_input("Enter Week Number for Day-wise Analysis", min_value=1, step=1, value=1, key="day_shrink_week")
-    df_day_shrink = get_day_shrinkage_overview(selected_week_for_day)
-    st.dataframe(df_day_shrink)
-    fig_day = px.bar(df_day_shrink, x="Day", y="Shrinkage (%)",
-                     title=f"Day-wise Shrinkage for Week {selected_week_for_day}",
-                     labels={"Shrinkage (%)": "Shrinkage (%)", "Day": "Day"})
+    df_day_shrink = get_weekly_shrinkage_overview()
+    # You can also show the day's shrinkage details in a table if needed.
+    st.dataframe(df_day_shrink[df_day_shrink["Week"] == selected_week_for_day])
+    
+    fig_day = px.bar(df_day_shrink[df_day_shrink["Week"] == selected_week_for_day],
+                     x="Week", y="Shrinkage (%)",
+                     title=f"Shrinkage for Week {selected_week_for_day}")
     st.plotly_chart(fig_day, use_container_width=True)
     
     st.markdown("#### Absent Details by Day")
