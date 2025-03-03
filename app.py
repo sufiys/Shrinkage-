@@ -132,7 +132,25 @@ def update_leave(login, week, day, leave_type, annotation=""):
             dates = get_week_dates_us(week, year=datetime.date.today().year)
             st.success(f"Leave ({leave_type}) updated for {login} on {day} (Date: {dates[day].strftime('%Y-%m-%d')}).")
         else:
-            st.error(f"Cannot code leave for {login} on week {week} {day} because status is not 'W'.")
+            st.error(f"Leave already coded for {login} on week {week} {day}. Please delete the existing leave to recode.")
+    else:
+        st.error("No schedule record found for the provided login and week.")
+
+def delete_leave(login, week, day):
+    c = conn.cursor()
+    query = f"SELECT {day} FROM schedule WHERE login = ? AND week = ?"
+    c.execute(query, (login, week))
+    result = c.fetchone()
+    if result:
+        current_val = result[0]
+        if current_val in ("AL", "SL", "CL", "L"):
+            update_query = f"UPDATE schedule SET {day} = ? WHERE login = ? AND week = ?"
+            c.execute(update_query, ("W", login, week))
+            c.execute("DELETE FROM leaves WHERE login = ? AND week = ? AND day = ?", (login, week, day))
+            conn.commit()
+            st.success(f"Deleted leave for {login} on {day} for week {week}.")
+        else:
+            st.error(f"No coded leave found for {login} on {day} for week {week}.")
     else:
         st.error("No schedule record found for the provided login and week.")
 
@@ -339,6 +357,9 @@ elif menu == "Schedule Management":
         c.execute("SELECT DISTINCT login FROM schedule")
         all_logins = [row[0] for row in c.fetchall()]
         if all_logins:
+            # ---------------------------
+            # Code Leave Section
+            # ---------------------------
             selected_logins = st.multiselect("Select CSA Login(s)", all_logins)
             if selected_logins:
                 weeks_set = set()
@@ -366,6 +387,28 @@ elif menu == "Schedule Management":
                 st.error("Please select at least one CSA login.")
         else:
             st.info("No CSA schedule data available. Please add schedule first.")
+        
+        # ---------------------------
+        # Delete Leave Section
+        # ---------------------------
+        st.markdown("### Delete Leave")
+        selected_logins_delete = st.multiselect("Select CSA Login(s) for Leave Deletion", all_logins, key="delete_leave_logins")
+        if selected_logins_delete:
+            weeks_set_delete = set()
+            for login in selected_logins_delete:
+                c.execute("SELECT DISTINCT week FROM schedule WHERE login = ?", (login,))
+                weeks_set_delete.update([row[0] for row in c.fetchall()])
+            weeks_available_delete = sorted(list(weeks_set_delete))
+            if weeks_available_delete:
+                selected_week_delete = st.selectbox("Select Week for Leave Deletion", weeks_available_delete, key="delete_leave_week")
+                selected_days_delete = st.multiselect("Select Day(s) to delete leave", ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"], key="delete_leave_days")
+                if st.button("Delete Leave", key="delete_leave_button"):
+                    for login in selected_logins_delete:
+                        for day in selected_days_delete:
+                            delete_leave(login, selected_week_delete, day)
+            else:
+                st.info("No weeks available for the selected login(s).")
+        
         st.subheader("Shrinkage Calculation for a Week")
         calc_week = st.number_input("Enter Week Number to calculate shrinkage", min_value=1, step=1, key="calc_week")
         year_calc = st.number_input("Enter Year for Calculation", value=datetime.date.today().year, step=1, key="calc_year")
@@ -382,7 +425,7 @@ elif menu == "Schedule Management":
                         st.table(pd.DataFrame(details["Details"]))
                     else:
                         st.write("No leave records for this day.")
-
+                        
 # ---------- Reports ----------
 elif menu == "Reports":
     st.title("Reports")
