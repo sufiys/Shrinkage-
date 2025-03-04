@@ -426,7 +426,7 @@ elif menu == "Schedule Management":
 # ---------- Reports ----------
 elif menu == "Reports":
     st.title("Reports")
-    tabs = st.tabs(["View Schedule", "Weekly Shrinkage", "Day-wise Leaves", "Delete Entry", "Update Entry", "Leave Summary"])
+    tabs = st.tabs(["View Schedule", "Weekly Shrinkage", "Day-wise Leaves", "Delete Entry", "Update Entry", "Leave Summary", "Monthly Report"])
     with tabs[0]:
         st.subheader("View Schedule by Week")
         selected_week = st.number_input("Enter Week Number", min_value=1, step=1, key="view_week")
@@ -536,3 +536,42 @@ elif menu == "Reports":
                 st.info("No leave records found for the selected CSA.")
         else:
             st.info("No CSA logins found in schedule data.")
+    with tabs[6]:
+        st.subheader("Monthly Report")
+        # Select multiple weeks and year for the report
+        selected_weeks = st.multiselect("Select Weeks", 
+                                        sorted(pd.read_sql_query("SELECT DISTINCT week FROM schedule", conn)["week"].tolist()))
+        year_monthly = st.number_input("Enter Year for Report", value=datetime.date.today().year, step=1, key="monthly_year")
+        if selected_weeks:
+            # Query leaves for the selected weeks
+            query = "SELECT * FROM leaves WHERE week IN ({seq})".format(seq=','.join(['?']*len(selected_weeks)))
+            df_leaves = pd.read_sql_query(query, conn, params=selected_weeks)
+            if not df_leaves.empty:
+                # Compute date for each leave record
+                df_leaves["Date"] = df_leaves.apply(lambda row: get_week_dates_us(row["week"], year_monthly)[row["day"]].strftime("%Y-%m-%d"), axis=1)
+                st.dataframe(df_leaves[["login", "week", "day", "Date", "leave_type", "annotation"]])
+            else:
+                st.info("No leave records found for selected weeks.")
+            
+            # Weekly count of leaves
+            df_group = df_leaves.groupby("week").size().reset_index(name="Leaves Count")
+            st.write("### Weekly Leaves Count")
+            st.dataframe(df_group)
+            total_leaves = df_leaves.shape[0]
+            st.write(f"**Total Leaves for selected weeks: {total_leaves}**")
+            
+            # Total scheduled and current shrinkage calculation for selected weeks
+            df_overview = get_weekly_shrinkage_overview()
+            df_selected = df_overview[df_overview["Week"].isin(selected_weeks)]
+            total_scheduled = df_selected["Total Scheduled"].sum()
+            current_shrinkage = (total_leaves / total_scheduled * 100) if total_scheduled > 0 else 0
+            st.write(f"**Total Scheduled for selected weeks: {total_scheduled}**")
+            st.write(f"**Current Shrinkage: {round(current_shrinkage,2)}%**")
+            
+            # Goal box to enter a target shrinkage goal
+            goal = st.number_input("Enter Shrinkage Goal (%)", min_value=0.0, max_value=100.0, value=current_shrinkage, step=0.1)
+            # Calculate the number of leaves to delete
+            required_deletion = max(0, total_leaves - int(total_scheduled * (goal/100)))
+            st.write(f"**To achieve a shrinkage goal of {goal}%, you need to delete at least {required_deletion} leave(s).**")
+        else:
+            st.info("Please select one or more weeks for the monthly report.")
