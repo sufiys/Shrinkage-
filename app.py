@@ -570,8 +570,12 @@ elif menu == "Reports":
             
             # Goal box to enter a target shrinkage goal
             goal = st.number_input("Enter Shrinkage Goal (%)", min_value=0.0, max_value=100.0, value=current_shrinkage, step=0.1)
-            # Calculate the number of leaves to delete
-            required_deletion = max(0, total_leaves - int(total_scheduled * (goal/100)))
+            
+            # Calculate the number of leaves to delete and the approval capacity
+            maximum_allowed = int(total_scheduled * (goal/100))
+            required_deletion = max(0, total_leaves - maximum_allowed)
+            additional_approval = max(0, maximum_allowed - total_leaves)
             st.write(f"**To achieve a shrinkage goal of {goal}%, you need to delete at least {required_deletion} leave(s).**")
+            st.write(f"**Additionally, you can approve up to {additional_approval} additional leave(s) (pending) to meet that goal.**")
         else:
             st.info("Please select one or more weeks for the monthly report.")
