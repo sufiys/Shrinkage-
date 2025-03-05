@@ -81,8 +81,9 @@ conn = init_db()
 def get_week_dates_us(week, year):
     """
     Compute the dates for a given week number using US-style weeks.
-    Week 1 is defined as the week containing January 1 (week starts on Sunday).
-    Returns a dict: {"Sun": date, "Mon": date, ..., "Sat": date}.
+    Week 1 is defined as the week containing January 1 
+    (week starts on Sunday: if Jan 1 isn’t Sunday, the Sunday on or before Jan 1 is used).
+    Returns a dictionary with keys: "Sun", "Mon", ..., "Sat" and date objects.
     """
     jan1 = datetime.date(year, 1, 1)
     offset = (jan1.weekday() + 1) % 7  
@@ -100,9 +101,13 @@ def get_week_from_date_us(selected_date):
     return diff // 7 + 1
 
 # ---------------------------
-# Database Update Functions
+# Database Update & Query Functions
 # ---------------------------
 def add_schedule(login, weeks, shift, weekoffs, year):
+    """
+    For each week, insert a schedule row.
+    For each day (Sun-Sat), if day (in lowercase) is in weekoffs, store "OFF"; otherwise, "W".
+    """
     c = conn.cursor()
     for week in weeks:
         schedule_values = {}
@@ -117,6 +122,10 @@ def add_schedule(login, weeks, shift, weekoffs, year):
     conn.commit()
 
 def update_leave(login, week, day, leave_type, annotation=""):
+    """
+    For a given schedule row (identified by login and week), if the cell for 'day' is "W",
+    update it with the leave code and record the leave.
+    """
     c = conn.cursor()
     query = f"SELECT {day} FROM schedule WHERE login = ? AND week = ?"
     c.execute(query, (login, week))
@@ -132,25 +141,7 @@ def update_leave(login, week, day, leave_type, annotation=""):
             dates = get_week_dates_us(week, year=datetime.date.today().year)
             st.success(f"Leave ({leave_type}) updated for {login} on {day} (Date: {dates[day].strftime('%Y-%m-%d')}).")
         else:
-            st.error(f"Leave already coded for {login} on week {week} {day}. Please delete the existing leave to recode.")
-    else:
-        st.error("No schedule record found for the provided login and week.")
-
-def delete_leave(login, week, day):
-    c = conn.cursor()
-    query = f"SELECT {day} FROM schedule WHERE login = ? AND week = ?"
-    c.execute(query, (login, week))
-    result = c.fetchone()
-    if result:
-        current_val = result[0]
-        if current_val in ("AL", "SL", "CL", "L"):
-            update_query = f"UPDATE schedule SET {day} = ? WHERE login = ? AND week = ?"
-            c.execute(update_query, ("W", login, week))
-            c.execute("DELETE FROM leaves WHERE login = ? AND week = ? AND day = ?", (login, week, day))
-            conn.commit()
-            st.success(f"Deleted leave for {login} on {day} for week {week}.")
-        else:
-            st.error(f"No coded leave found for {login} on {day} for week {week}.")
+            st.error(f"Cannot code leave for {login} on week {week} {day} because status is not 'W'.")
     else:
         st.error("No schedule record found for the provided login and week.")
 
@@ -172,21 +163,9 @@ def get_weekly_shrinkage_overview():
         overview.append({"Week": wk, "Total Scheduled": total_scheduled, "Total Leaves": total_leaves, "Shrinkage (%)": round(shrinkage,2)})
     return pd.DataFrame(overview)
 
-def get_day_shrinkage_details(week, day):
-    c = conn.cursor()
-    c.execute(f"SELECT COUNT(*) FROM schedule WHERE week = ? AND {day} != 'OFF'", (week,))
-    scheduled = c.fetchone()[0]
-    c.execute(f"SELECT COUNT(*) FROM schedule WHERE week = ? AND {day} IN ('AL','SL','CL','L')", (week,))
-    leaves = c.fetchone()[0]
-    shrinkage = (leaves / scheduled * 100) if scheduled > 0 else 0
-    c.execute("SELECT login, leave_type, annotation FROM leaves WHERE week = ? AND day = ?", (week, day))
-    details = [{"login": row[0], "leave_type": row[1], "annotation": row[2]} for row in c.fetchall()]
-    return {"Scheduled": scheduled, "Leaves": leaves, "Shrinkage (%)": round(shrinkage, 2), "Details": details}
-
 def get_daywise_leaves(week, day):
-    # Fetch leave details including annotations.
-    query = "SELECT id, login, leave_type as Leave_Type, annotation FROM leaves WHERE week = ? AND day = ?"
-    return pd.read_sql_query(query, conn, params=(week, day))
+    query = f"SELECT id, login, shift, {day} as Leave_Type FROM schedule WHERE week = ? AND {day} IN ('AL','SL','CL','L')"
+    return pd.read_sql_query(query, conn, params=(week,))
 
 def update_schedule_day(entry_id, day, new_value):
     c = conn.cursor()
@@ -234,6 +213,17 @@ def get_leave_summary(login):
         df["Date"] = df.apply(lambda row: get_week_dates_us(row["week"], datetime.date.today().year)[row["day"]].strftime("%Y-%m-%d"), axis=1)
     return df
 
+def get_day_shrinkage_details(week, day):
+    c = conn.cursor()
+    c.execute(f"SELECT COUNT(*) FROM schedule WHERE week = ? AND {day} != 'OFF'", (week,))
+    scheduled = c.fetchone()[0]
+    c.execute(f"SELECT COUNT(*) FROM schedule WHERE week = ? AND {day} IN ('AL','SL','CL','L')", (week,))
+    leaves = c.fetchone()[0]
+    shrinkage = (leaves / scheduled * 100) if scheduled > 0 else 0
+    c.execute("SELECT login, leave_type, annotation FROM leaves WHERE week = ? AND day = ?", (week, day))
+    details = [{"login": row[0], "leave_type": row[1], "annotation": row[2]} for row in c.fetchall()]
+    return {"Scheduled": scheduled, "Leaves": leaves, "Shrinkage (%)": round(shrinkage, 2), "Details": details}
+
 def get_day_shrinkage_overview(week):
     days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
     data = []
@@ -243,16 +233,16 @@ def get_day_shrinkage_overview(week):
     return pd.DataFrame(data)
 
 # ---------------------------
-# Main Navigation
+# Main Navigation: Dashboard, Schedule Management, Reports
 # ---------------------------
-menu = st.sidebar.radio("Navigation", ["Dashboard", "Schedule Management", "Reports"])
+main_menu = st.sidebar.radio("Navigation", ["Dashboard", "Schedule Management", "Reports"])
 
 # ---------- Dashboard ----------
-if menu == "Dashboard":
+if main_menu == "Dashboard":
     st.title("Dashboard")
     st.markdown("### Overview and Interactive Analytics")
     
-    # Weekly Shrinkage Overview
+    # Overall weekly shrinkage overview
     df_shrink = get_weekly_shrinkage_overview()
     if not df_shrink.empty:
         st.subheader("Weekly Shrinkage Overview")
@@ -262,7 +252,7 @@ if menu == "Dashboard":
     else:
         st.info("No schedule data available for analytics.")
     
-    # Day-wise Shrinkage Analysis with Absent Details
+    # Day-wise shrinkage for a selected week
     st.markdown("### Day-wise Shrinkage Analysis")
     selected_week_for_day = st.number_input("Enter Week Number for Day-wise Analysis", min_value=1, step=1, value=1, key="day_shrink_week")
     df_day_shrink = get_day_shrinkage_overview(selected_week_for_day)
@@ -271,22 +261,13 @@ if menu == "Dashboard":
                      title=f"Day-wise Shrinkage for Week {selected_week_for_day}",
                      labels={"Shrinkage (%)": "Shrinkage (%)", "Day": "Day"})
     st.plotly_chart(fig_day, use_container_width=True)
-    
-    st.markdown("#### Absent Details by Day")
-    week_dates = get_week_dates_us(selected_week_for_day, datetime.date.today().year)
-    for day in ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]:
-        details = get_day_shrinkage_details(selected_week_for_day, day)
-        st.markdown(f"**{day} - {week_dates[day].strftime('%Y-%m-%d')}**")
-        if details["Details"]:
-            df_details = pd.DataFrame(details["Details"])
-            st.table(df_details)
-        else:
-            st.write("No absences for this day.")
 
 # ---------- Schedule Management ----------
-elif menu == "Schedule Management":
+elif main_menu == "Schedule Management":
     st.title("Schedule Management")
     sub_menu = st.sidebar.radio("Options", ["Schedule Setup", "Leaves & Shrinkage"])
+    
+    # --- Schedule Setup ---
     if sub_menu == "Schedule Setup":
         st.header("Schedule Setup")
         col1, col2, col3 = st.columns(3)
@@ -349,7 +330,7 @@ elif menu == "Schedule Management":
                     required_cols = ["CSA Logins", "Week", "year", "shift", "Weekoff"]
                     missing = [col for col in required_cols if col not in df_excel.columns]
                     if missing:
-                        st.error(f"Missing columns: {', '.join(missing)}")
+                        st.error(f"Missing columns in Excel file: {', '.join(missing)}")
                     else:
                         for index, row in df_excel.iterrows():
                             logins_str = row["CSA Logins"]
@@ -365,68 +346,75 @@ elif menu == "Schedule Management":
                         st.session_state.bulk_processed = True
                 except Exception as e:
                     st.error(f"Error processing file: {e}")
+    
+    # --- Leaves & Shrinkage ---
     elif sub_menu == "Leaves & Shrinkage":
         st.header("Leaves & Shrinkage")
+        # For this feature, the user selects a single CSA login and week; then the schedule is displayed with day & date headers.
         c = conn.cursor()
         c.execute("SELECT DISTINCT login FROM schedule")
         all_logins = [row[0] for row in c.fetchall()]
         if all_logins:
-            # ---------------------------
-            # Code Leave Section
-            # ---------------------------
-            selected_logins = st.multiselect("Select CSA Login(s)", all_logins)
-            if selected_logins:
-                weeks_set = set()
-                for login in selected_logins:
-                    c.execute("SELECT DISTINCT week FROM schedule WHERE login = ?", (login,))
-                    weeks_set.update([row[0] for row in c.fetchall()])
-                weeks_available = sorted(list(weeks_set))
-                selected_week = st.selectbox("Select Week", weeks_available)
-                selected_days = st.multiselect("Select Day(s)", ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"])
-                leave_type = st.radio("Select Leave Type", ["AL", "SL", "CL", "L"])
-                annotation = st.text_area("Annotation (Optional)")
-                year_for_leave = st.number_input("Enter Year", value=datetime.date.today().year, step=1, key="year_leave")
-                if selected_days:
-                    dates = get_week_dates_us(selected_week, year_for_leave)
-                    st.write("Scheduled Dates:")
-                    for d in selected_days:
-                        st.write(f"{d}: {dates[d].strftime('%Y-%m-%d')}")
-                    if st.button("Submit Leave"):
-                        for login in selected_logins:
-                            for d in selected_days:
-                                update_leave(login, selected_week, d, leave_type, annotation)
-                else:
-                    st.error("Please select at least one day.")
+            selected_login = st.selectbox("Select CSA Login", all_logins)
+            c.execute("SELECT DISTINCT week FROM schedule WHERE login = ?", (selected_login,))
+            available_weeks = [row[0] for row in c.fetchall()]
+            if not available_weeks:
+                st.info("No schedule data found for the selected login.")
             else:
-                st.error("Please select at least one CSA login.")
+                selected_week = st.selectbox("Select Week", available_weeks)
+                selected_year = st.number_input("Enter Year", value=datetime.date.today().year, step=1)
+                # Retrieve the schedule record for the login and week.
+                df_schedule = pd.read_sql_query("SELECT * FROM schedule WHERE login = ? AND week = ?", conn, params=(selected_login, selected_week))
+                if not df_schedule.empty:
+                    schedule_record = df_schedule.iloc[0]
+                    computed_dates = get_week_dates_us(selected_week, selected_year)
+                    display_schedule = {}
+                    available_leave_options = []  # Only days with status "W"
+                    for day in ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]:
+                        header = f"{day} ({computed_dates[day].strftime('%Y-%m-%d')})"
+                        value = schedule_record[day]
+                        display_schedule[header] = value
+                        if value == "W":
+                            available_leave_options.append(header)
+                    st.write(f"Schedule for **{selected_login}** (Week {selected_week}, Year {selected_year}):")
+                    st.table(pd.DataFrame([display_schedule]))
+                    # Let user select one or more dates (headers) to code leave.
+                    selected_leave_headers = st.multiselect("Select Date(s) for Leave", available_leave_options)
+                    if selected_leave_headers:
+                        leave_type = st.radio("Select Leave Type", ["AL", "SL", "CL", "L"])
+                        annotation = st.text_area("Annotation (Optional)")
+                        if st.button("Submit Leave"):
+                            for header in selected_leave_headers:
+                                day_abbr = header.split()[0]  # e.g., "Sun"
+                                update_leave(selected_login, selected_week, day_abbr, leave_type, annotation)
+                    else:
+                        st.info("No available work days selected for leave coding.")
+                else:
+                    st.info("No schedule record found for the selected login and week.")
         else:
             st.info("No CSA schedule data available. Please add schedule first.")
-        
-        # ---------------------------
-        # Delete Leave Section
-        # ---------------------------
-        st.markdown("### Delete Leave")
-        selected_logins_delete = st.multiselect("Select CSA Login(s) for Leave Deletion", all_logins, key="delete_leave_logins")
-        if selected_logins_delete:
-            weeks_set_delete = set()
-            for login in selected_logins_delete:
-                c.execute("SELECT DISTINCT week FROM schedule WHERE login = ?", (login,))
-                weeks_set_delete.update([row[0] for row in c.fetchall()])
-            weeks_available_delete = sorted(list(weeks_set_delete))
-            if weeks_available_delete:
-                selected_week_delete = st.selectbox("Select Week for Leave Deletion", weeks_available_delete, key="delete_leave_week")
-                selected_days_delete = st.multiselect("Select Day(s) to delete leave", ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"], key="delete_leave_days")
-                if st.button("Delete Leave", key="delete_leave_button"):
-                    for login in selected_logins_delete:
-                        for day in selected_days_delete:
-                            delete_leave(login, selected_week_delete, day)
-            else:
-                st.info("No weeks available for the selected login(s).")
-        
+        st.subheader("Shrinkage Calculation for a Week")
+        calc_week = st.number_input("Enter Week Number to calculate shrinkage", min_value=1, step=1, key="calc_week")
+        year_calc = st.number_input("Enter Year for Calculation", value=datetime.date.today().year, step=1, key="calc_year")
+        if st.button("Calculate Shrinkage"):
+            df_overview = get_weekly_shrinkage_overview()
+            st.write("### Overall Weekly Shrinkage Overview")
+            st.dataframe(df_overview[df_overview['Week'] == calc_week])
+            st.markdown("#### Day-wise Shrinkage Details")
+            for d in ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]:
+                details = get_day_shrinkage_details(calc_week, d)
+                with st.expander(f"{d} Details"):
+                    st.write(f"Scheduled: {details['Scheduled']}, Leaves: {details['Leaves']}, Shrinkage: {details['Shrinkage (%)']}%")
+                    if details["Details"]:
+                        st.table(pd.DataFrame(details["Details"]))
+                    else:
+                        st.write("No leave records for this day.")
+
 # ---------- Reports ----------
-elif menu == "Reports":
+elif main_menu == "Reports":
     st.title("Reports")
-    tabs = st.tabs(["View Schedule", "Weekly Shrinkage", "Day-wise Leaves", "Delete Entry", "Update Entry", "Leave Summary", "Monthly Report"])
+    tabs = st.tabs(["View Schedule", "Weekly Shrinkage", "Day-wise Leaves", "Delete Entry", "Update Entry", "Leave Summary"])
+    
     with tabs[0]:
         st.subheader("View Schedule by Week")
         selected_week = st.number_input("Enter Week Number", min_value=1, step=1, key="view_week")
@@ -440,6 +428,7 @@ elif menu == "Reports":
             st.dataframe(df_schedule)
         else:
             st.info("No schedule records found for the selected week.")
+    
     with tabs[1]:
         st.subheader("Weekly Shrinkage Overview")
         df_overview = get_weekly_shrinkage_overview()
@@ -449,6 +438,7 @@ elif menu == "Reports":
             st.bar_chart(df_overview.set_index("Week")["Shrinkage (%)"])
         else:
             st.info("No schedule data available to calculate shrinkage.")
+    
     with tabs[2]:
         st.subheader("Day-wise Leaves")
         leaves_week = st.number_input("Enter Week Number to view leaves", min_value=1, step=1, key="leaves_week_overview")
@@ -462,6 +452,7 @@ elif menu == "Reports":
                 st.dataframe(df_day_leaves)
             else:
                 st.info("No leave records found for the selected week and day.")
+    
     with tabs[3]:
         st.subheader("Delete Entry")
         st.markdown("**Bulk Delete Options:**")
@@ -503,6 +494,7 @@ elif menu == "Reports":
                     st.dataframe(df_all)
                 else:
                     st.error("Please select at least one Schedule ID.")
+    
     with tabs[4]:
         st.subheader("Update Entry")
         st.markdown("**Bulk Update Options:**")
@@ -520,6 +512,7 @@ elif menu == "Reports":
                 update_schedule_day_bulk(up_logins, up_weeks, up_days, new_value)
             else:
                 st.error("Please select at least one login, one week, and one day.")
+    
     with tabs[5]:
         st.subheader("Leave Summary")
         c = conn.cursor()
@@ -536,46 +529,4 @@ elif menu == "Reports":
                 st.info("No leave records found for the selected CSA.")
         else:
             st.info("No CSA logins found in schedule data.")
-    with tabs[6]:
-        st.subheader("Monthly Report")
-        # Select multiple weeks and year for the report
-        selected_weeks = st.multiselect("Select Weeks", 
-                                        sorted(pd.read_sql_query("SELECT DISTINCT week FROM schedule", conn)["week"].tolist()))
-        year_monthly = st.number_input("Enter Year for Report", value=datetime.date.today().year, step=1, key="monthly_year")
-        if selected_weeks:
-            # Query leaves for the selected weeks
-            query = "SELECT * FROM leaves WHERE week IN ({seq})".format(seq=','.join(['?']*len(selected_weeks)))
-            df_leaves = pd.read_sql_query(query, conn, params=selected_weeks)
-            if not df_leaves.empty:
-                # Compute date for each leave record
-                df_leaves["Date"] = df_leaves.apply(lambda row: get_week_dates_us(row["week"], year_monthly)[row["day"]].strftime("%Y-%m-%d"), axis=1)
-                st.dataframe(df_leaves[["login", "week", "day", "Date", "leave_type", "annotation"]])
-            else:
-                st.info("No leave records found for selected weeks.")
-            
-            # Weekly count of leaves
-            df_group = df_leaves.groupby("week").size().reset_index(name="Leaves Count")
-            st.write("### Weekly Leaves Count")
-            st.dataframe(df_group)
-            total_leaves = df_leaves.shape[0]
-            st.write(f"**Total Leaves for selected weeks: {total_leaves}**")
-            
-            # Total scheduled and current shrinkage calculation for selected weeks
-            df_overview = get_weekly_shrinkage_overview()
-            df_selected = df_overview[df_overview["Week"].isin(selected_weeks)]
-            total_scheduled = df_selected["Total Scheduled"].sum()
-            current_shrinkage = (total_leaves / total_scheduled * 100) if total_scheduled > 0 else 0
-            st.write(f"**Total Scheduled for selected weeks: {total_scheduled}**")
-            st.write(f"**Current Shrinkage: {round(current_shrinkage,2)}%**")
-            
-            # Goal box to enter a target shrinkage goal
-            goal = st.number_input("Enter Shrinkage Goal (%)", min_value=0.0, max_value=100.0, value=current_shrinkage, step=0.1)
-            
-            # Calculate the number of leaves to delete and the approval capacity
-            maximum_allowed = int(total_scheduled * (goal/100))
-            required_deletion = max(0, total_leaves - maximum_allowed)
-            additional_approval = max(0, maximum_allowed - total_leaves)
-            st.write(f"**To achieve a shrinkage goal of {goal}%, you need to delete at least {required_deletion} leave(s).**")
-            st.write(f"**Additionally, you can approve up to {additional_approval} additional leave(s) (pending) to meet that goal.**")
-        else:
-            st.info("Please select one or more weeks for the monthly report.")
+
