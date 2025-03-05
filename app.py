@@ -82,8 +82,8 @@ def get_week_dates_us(week, year):
     """
     Compute the dates for a given week number using US-style weeks.
     Week 1 is defined as the week containing January 1 
-    (week starts on Sunday: if Jan 1 isn’t Sunday, the Sunday on or before Jan 1 is used).
-    Returns a dictionary with keys: "Sun", "Mon", ..., "Sat" and date objects.
+    (if Jan 1 isn’t Sunday, use the Sunday on or before Jan 1).
+    Returns a dict: {"Sun": date, "Mon": date, ..., "Sat": date}.
     """
     jan1 = datetime.date(year, 1, 1)
     offset = (jan1.weekday() + 1) % 7  
@@ -104,10 +104,6 @@ def get_week_from_date_us(selected_date):
 # Database Update & Query Functions
 # ---------------------------
 def add_schedule(login, weeks, shift, weekoffs, year):
-    """
-    For each week, insert a schedule row.
-    For each day (Sun-Sat), if day (in lowercase) is in weekoffs, store "OFF"; otherwise, "W".
-    """
     c = conn.cursor()
     for week in weeks:
         schedule_values = {}
@@ -122,10 +118,6 @@ def add_schedule(login, weeks, shift, weekoffs, year):
     conn.commit()
 
 def update_leave(login, week, day, leave_type, annotation=""):
-    """
-    For a given schedule row (identified by login and week), if the cell for 'day' is "W",
-    update it with the leave code and record the leave.
-    """
     c = conn.cursor()
     query = f"SELECT {day} FROM schedule WHERE login = ? AND week = ?"
     c.execute(query, (login, week))
@@ -233,6 +225,68 @@ def get_day_shrinkage_overview(week):
     return pd.DataFrame(data)
 
 # ---------------------------
+# Monthly Report Function
+# ---------------------------
+def get_monthly_report(month, year):
+    df = pd.read_sql_query("SELECT * FROM schedule", conn)
+    total_scheduled = 0
+    total_leaves = 0
+    details_list = []
+    for idx, row in df.iterrows():
+        week = row["week"]
+        week_dates = get_week_dates_us(week, year)
+        for day in ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]:
+            date_obj = week_dates[day]
+            if date_obj.month == month:
+                if row[day] != "OFF":
+                    total_scheduled += 1
+                    if row[day] in ("AL", "SL", "CL", "L"):
+                        total_leaves += 1
+                        details_list.append({
+                            "Week": week,
+                            "Day": day,
+                            "Date": date_obj.strftime("%Y-%m-%d"),
+                            "Status": row[day]
+                        })
+    shrinkage = (total_leaves / total_scheduled * 100) if total_scheduled > 0 else 0
+    summary = {"Month": month, "Year": year, "Total Scheduled": total_scheduled, "Total Leaves": total_leaves, "Shrinkage (%)": round(shrinkage, 2)}
+    details_df = pd.DataFrame(details_list)
+    return summary, details_df
+
+# ---------------------------
+# Goal Analysis Function
+# ---------------------------
+def analyze_goal_for_week(week, goal):
+    """
+    For a selected week, calculates:
+    - Total scheduled days and total leaves.
+    - Allowed leaves to meet the goal (allowed = total_scheduled * (goal/100)).
+    - Difference between current leaves and allowed leaves.
+    
+    Returns a dictionary with these values and a recommendation.
+    """
+    df_overview = get_weekly_shrinkage_overview()
+    row = df_overview[df_overview["Week"] == week]
+    if row.empty:
+        return None
+    row = row.iloc[0]
+    total_scheduled = row["Total Scheduled"]
+    current_leaves = row["Total Leaves"]
+    allowed_leaves = (goal / 100) * total_scheduled
+    result = {
+        "Total Scheduled": total_scheduled,
+        "Current Leaves": current_leaves,
+        "Allowed Leaves": allowed_leaves,
+    }
+    if current_leaves > allowed_leaves:
+        result["Action"] = f"Cancel approximately {current_leaves - allowed_leaves:.0f} leave(s) to meet your goal."
+    elif current_leaves < allowed_leaves:
+        result["Action"] = f"You can approve up to {allowed_leaves - current_leaves:.0f} additional leave(s) and still meet your goal."
+    else:
+        result["Action"] = "Your current shrinkage meets the goal exactly."
+    return result
+
+# ---------------------------
 # Main Navigation: Dashboard, Schedule Management, Reports
 # ---------------------------
 main_menu = st.sidebar.radio("Navigation", ["Dashboard", "Schedule Management", "Reports"])
@@ -242,7 +296,7 @@ if main_menu == "Dashboard":
     st.title("Dashboard")
     st.markdown("### Overview and Interactive Analytics")
     
-    # Overall weekly shrinkage overview
+    # Overall Weekly Shrinkage Overview
     df_shrink = get_weekly_shrinkage_overview()
     if not df_shrink.empty:
         st.subheader("Weekly Shrinkage Overview")
@@ -252,7 +306,20 @@ if main_menu == "Dashboard":
     else:
         st.info("No schedule data available for analytics.")
     
-    # Day-wise shrinkage for a selected week
+    # Weekly Goal Analysis
+    st.markdown("### Weekly Goal Analysis")
+    goal_value = st.number_input("Enter your weekly shrinkage goal (%)", value=5.0, step=0.1, key="weekly_goal")
+    selected_week_goal = st.number_input("Enter Week Number for Goal Analysis", min_value=1, step=1, value=1, key="goal_week")
+    analysis = analyze_goal_for_week(selected_week_goal, goal_value)
+    if analysis:
+        st.write(f"Total Scheduled Days: {analysis['Total Scheduled']}")
+        st.write(f"Current Leaves: {analysis['Current Leaves']}")
+        st.write(f"Allowed Leaves (to meet goal of {goal_value}%): {analysis['Allowed Leaves']:.2f}")
+        st.markdown(f"**Recommendation:** {analysis['Action']}")
+    else:
+        st.info("No data available for the selected week for goal analysis.")
+    
+    # Day-wise Shrinkage Analysis for a selected week
     st.markdown("### Day-wise Shrinkage Analysis")
     selected_week_for_day = st.number_input("Enter Week Number for Day-wise Analysis", min_value=1, step=1, value=1, key="day_shrink_week")
     df_day_shrink = get_day_shrinkage_overview(selected_week_for_day)
@@ -350,7 +417,6 @@ elif main_menu == "Schedule Management":
     # --- Leaves & Shrinkage ---
     elif sub_menu == "Leaves & Shrinkage":
         st.header("Leaves & Shrinkage")
-        # For this feature, the user selects a single CSA login and week; then the schedule is displayed with day & date headers.
         c = conn.cursor()
         c.execute("SELECT DISTINCT login FROM schedule")
         all_logins = [row[0] for row in c.fetchall()]
@@ -363,13 +429,12 @@ elif main_menu == "Schedule Management":
             else:
                 selected_week = st.selectbox("Select Week", available_weeks)
                 selected_year = st.number_input("Enter Year", value=datetime.date.today().year, step=1)
-                # Retrieve the schedule record for the login and week.
                 df_schedule = pd.read_sql_query("SELECT * FROM schedule WHERE login = ? AND week = ?", conn, params=(selected_login, selected_week))
                 if not df_schedule.empty:
                     schedule_record = df_schedule.iloc[0]
                     computed_dates = get_week_dates_us(selected_week, selected_year)
                     display_schedule = {}
-                    available_leave_options = []  # Only days with status "W"
+                    available_leave_options = []
                     for day in ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]:
                         header = f"{day} ({computed_dates[day].strftime('%Y-%m-%d')})"
                         value = schedule_record[day]
@@ -378,14 +443,13 @@ elif main_menu == "Schedule Management":
                             available_leave_options.append(header)
                     st.write(f"Schedule for **{selected_login}** (Week {selected_week}, Year {selected_year}):")
                     st.table(pd.DataFrame([display_schedule]))
-                    # Let user select one or more dates (headers) to code leave.
                     selected_leave_headers = st.multiselect("Select Date(s) for Leave", available_leave_options)
                     if selected_leave_headers:
                         leave_type = st.radio("Select Leave Type", ["AL", "SL", "CL", "L"])
                         annotation = st.text_area("Annotation (Optional)")
                         if st.button("Submit Leave"):
                             for header in selected_leave_headers:
-                                day_abbr = header.split()[0]  # e.g., "Sun"
+                                day_abbr = header.split()[0]
                                 update_leave(selected_login, selected_week, day_abbr, leave_type, annotation)
                     else:
                         st.info("No available work days selected for leave coding.")
@@ -393,6 +457,7 @@ elif main_menu == "Schedule Management":
                     st.info("No schedule record found for the selected login and week.")
         else:
             st.info("No CSA schedule data available. Please add schedule first.")
+        
         st.subheader("Shrinkage Calculation for a Week")
         calc_week = st.number_input("Enter Week Number to calculate shrinkage", min_value=1, step=1, key="calc_week")
         year_calc = st.number_input("Enter Year for Calculation", value=datetime.date.today().year, step=1, key="calc_year")
@@ -413,7 +478,7 @@ elif main_menu == "Schedule Management":
 # ---------- Reports ----------
 elif main_menu == "Reports":
     st.title("Reports")
-    tabs = st.tabs(["View Schedule", "Weekly Shrinkage", "Day-wise Leaves", "Delete Entry", "Update Entry", "Leave Summary"])
+    tabs = st.tabs(["View Schedule", "Weekly Shrinkage", "Day-wise Leaves", "Delete Entry", "Update Entry", "Leave Summary", "Monthly Report"])
     
     with tabs[0]:
         st.subheader("View Schedule by Week")
@@ -529,4 +594,45 @@ elif main_menu == "Reports":
                 st.info("No leave records found for the selected CSA.")
         else:
             st.info("No CSA logins found in schedule data.")
+    
+    with tabs[6]:
+        st.subheader("Monthly Report")
+        selected_month = st.selectbox("Select Month", list(range(1,13)), format_func=lambda x: datetime.date(1900, x, 1).strftime('%B'))
+        report_year = st.number_input("Enter Year", value=datetime.date.today().year, step=1, key="report_year")
+        goal_monthly = st.number_input("Enter your monthly shrinkage goal (%)", value=5.0, step=0.1, key="monthly_goal")
+        if st.button("Generate Monthly Report"):
+            def get_monthly_report(month, year):
+                df = pd.read_sql_query("SELECT * FROM schedule", conn)
+                total_scheduled = 0
+                total_leaves = 0
+                details_list = []
+                for idx, row in df.iterrows():
+                    week = row["week"]
+                    week_dates = get_week_dates_us(week, year)
+                    for day in ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]:
+                        date_obj = week_dates[day]
+                        if date_obj.month == month:
+                            if row[day] != "OFF":
+                                total_scheduled += 1
+                                if row[day] in ("AL", "SL", "CL", "L"):
+                                    total_leaves += 1
+                                    details_list.append({
+                                        "Week": week,
+                                        "Day": day,
+                                        "Date": date_obj.strftime("%Y-%m-%d"),
+                                        "Status": row[day]
+                                    })
+                shrinkage = (total_leaves / total_scheduled * 100) if total_scheduled > 0 else 0
+                summary = {"Month": month, "Year": year, "Total Scheduled": total_scheduled, "Total Leaves": total_leaves, "Shrinkage (%)": round(shrinkage, 2)}
+                details_df = pd.DataFrame(details_list)
+                return summary, details_df
+            summary, details_df = get_monthly_report(selected_month, report_year)
+            st.markdown("### Monthly Summary")
+            st.write(summary)
+            if summary["Shrinkage (%)"] <= goal_monthly:
+                st.success("Monthly goal met! Shrinkage is within target.")
+            else:
+                st.error("Monthly goal not met! Shrinkage exceeds target.")
+            st.markdown("### Detailed Report")
+            st.dataframe(details_df)
 
