@@ -371,58 +371,67 @@ elif menu == "Schedule Management":
         c.execute("SELECT DISTINCT login FROM schedule")
         all_logins = [row[0] for row in c.fetchall()]
         if all_logins:
-            # ---------------------------
-            # Code Leave Section
-            # ---------------------------
-            selected_logins = st.multiselect("Select CSA Login(s)", all_logins)
-            if selected_logins:
-                weeks_set = set()
-                for login in selected_logins:
-                    c.execute("SELECT DISTINCT week FROM schedule WHERE login = ?", (login,))
-                    weeks_set.update([row[0] for row in c.fetchall()])
-                weeks_available = sorted(list(weeks_set))
+            # --- Code Leave Section with Schedule Display ---
+            selected_login = st.selectbox("Select CSA Login", all_logins)
+            c.execute("SELECT DISTINCT week FROM schedule WHERE login = ?", (selected_login,))
+            weeks_available = sorted([row[0] for row in c.fetchall()])
+            if weeks_available:
                 selected_week = st.selectbox("Select Week", weeks_available)
-                selected_days = st.multiselect("Select Day(s)", ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"])
-                leave_type = st.radio("Select Leave Type", ["AL", "SL", "CL", "L"])
-                annotation = st.text_area("Annotation (Optional)")
                 year_for_leave = st.number_input("Enter Year", value=datetime.date.today().year, step=1, key="year_leave")
-                if selected_days:
+                # Retrieve schedule for selected CSA and week
+                df_schedule = pd.read_sql_query("SELECT * FROM schedule WHERE login = ? AND week = ?", conn, params=(selected_login, selected_week))
+                if not df_schedule.empty:
                     dates = get_week_dates_us(selected_week, year_for_leave)
-                    st.write("Scheduled Dates:")
-                    for d in selected_days:
-                        st.write(f"{d}: {dates[d].strftime('%Y-%m-%d')}")
-                    if st.button("Submit Leave"):
-                        for login in selected_logins:
-                            for d in selected_days:
-                                update_leave(login, selected_week, d, leave_type, annotation)
+                    schedule_data = []
+                    for day in ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]:
+                        schedule_data.append({
+                            "Day": day,
+                            "Date": dates[day].strftime('%Y-%m-%d'),
+                            "Status": df_schedule.iloc[0][day]
+                        })
+                    df_sched_display = pd.DataFrame(schedule_data)
+                    st.markdown("#### CSA Schedule")
+                    st.table(df_sched_display)
+                    
+                    # Allow user to select dates (only from days with status "W")
+                    available_options = [f"{item['Day']} ({item['Date']})" for item in schedule_data if item["Status"] == "W"]
+                    if available_options:
+                        selected_options = st.multiselect("Select Dates for Leaves", available_options)
+                        leave_type = st.radio("Select Leave Type", ["AL", "SL", "CL", "L"])
+                        annotation = st.text_area("Annotation (Optional)")
+                        if st.button("Submit Leave"):
+                            for option in selected_options:
+                                # Extract day abbreviation from option (assumes format: "Day (YYYY-MM-DD)")
+                                day_code = option.split()[0]
+                                update_leave(selected_login, selected_week, day_code, leave_type, annotation)
+                    else:
+                        st.info("No available days for coding leave (all days already coded or off).")
                 else:
-                    st.error("Please select at least one day.")
+                    st.error("No schedule record found for the selected CSA and week.")
             else:
-                st.error("Please select at least one CSA login.")
+                st.error("No weeks found for the selected CSA.")
+            
+            # --- Delete Leave Section (unchanged) ---
+            st.markdown("### Delete Leave")
+            selected_logins_delete = st.multiselect("Select CSA Login(s) for Leave Deletion", all_logins, key="delete_leave_logins")
+            if selected_logins_delete:
+                weeks_set_delete = set()
+                for login in selected_logins_delete:
+                    c.execute("SELECT DISTINCT week FROM schedule WHERE login = ?", (login,))
+                    weeks_set_delete.update([row[0] for row in c.fetchall()])
+                weeks_available_delete = sorted(list(weeks_set_delete))
+                if weeks_available_delete:
+                    selected_week_delete = st.selectbox("Select Week for Leave Deletion", weeks_available_delete, key="delete_leave_week")
+                    selected_days_delete = st.multiselect("Select Day(s) to delete leave", ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"], key="delete_leave_days")
+                    if st.button("Delete Leave", key="delete_leave_button"):
+                        for login in selected_logins_delete:
+                            for day in selected_days_delete:
+                                delete_leave(login, selected_week_delete, day)
+                else:
+                    st.info("No weeks available for the selected login(s).")
         else:
             st.info("No CSA schedule data available. Please add schedule first.")
-        
-        # ---------------------------
-        # Delete Leave Section
-        # ---------------------------
-        st.markdown("### Delete Leave")
-        selected_logins_delete = st.multiselect("Select CSA Login(s) for Leave Deletion", all_logins, key="delete_leave_logins")
-        if selected_logins_delete:
-            weeks_set_delete = set()
-            for login in selected_logins_delete:
-                c.execute("SELECT DISTINCT week FROM schedule WHERE login = ?", (login,))
-                weeks_set_delete.update([row[0] for row in c.fetchall()])
-            weeks_available_delete = sorted(list(weeks_set_delete))
-            if weeks_available_delete:
-                selected_week_delete = st.selectbox("Select Week for Leave Deletion", weeks_available_delete, key="delete_leave_week")
-                selected_days_delete = st.multiselect("Select Day(s) to delete leave", ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"], key="delete_leave_days")
-                if st.button("Delete Leave", key="delete_leave_button"):
-                    for login in selected_logins_delete:
-                        for day in selected_days_delete:
-                            delete_leave(login, selected_week_delete, day)
-            else:
-                st.info("No weeks available for the selected login(s).")
-        
+
 # ---------- Reports ----------
 elif menu == "Reports":
     st.title("Reports")
@@ -571,7 +580,7 @@ elif menu == "Reports":
             # Goal box to enter a target shrinkage goal
             goal = st.number_input("Enter Shrinkage Goal (%)", min_value=0.0, max_value=100.0, value=current_shrinkage, step=0.1)
             
-            # Calculate the number of leaves to delete and the approval capacity
+            # Calculate maximum allowed leaves based on goal
             maximum_allowed = int(total_scheduled * (goal/100))
             required_deletion = max(0, total_leaves - maximum_allowed)
             additional_approval = max(0, maximum_allowed - total_leaves)
